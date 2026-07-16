@@ -1,0 +1,18 @@
+{
+  "status": "complete",
+  "best_model": "YOLOv8n-Pose",
+  "audio_offset": 0.0,
+  "overall_score": 100.0,
+  "part_scores": {
+    "Left Arm": 100.0,
+    "Right Arm": 100.0,
+    "Left Leg": 100.0,
+    "Right Leg": 100.0,
+    "Torso": 100.0
+  },
+  "benchmark": {},
+  "output_video": "merged_dance_with_feedback.mp4",
+  "chart_image": null,
+  "video1_frames": 758,
+  "video2_frames": 758
+}

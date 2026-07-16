@@ -1,0 +1,15 @@
+flask
+flask-cors
+opencv-python-headless
+mediapipe
+tensorflow
+tensorflow-hub
+ultralytics
+moviepy==1.0.3
+librosa
+scipy
+numpy
+matplotlib
+seaborn
+soundfile
+pillow

@@ -1,0 +1,672 @@
+# Install all required libraries
+!pip install mediapipe opencv-python-headless numpy scipy moviepy librosa soundfile pillow -q
+!pip install tensorflow tensorflow-hub -q        # MoveNet
+!pip install ultralytics -q                      # YOLOv8-Pose
+!pip install matplotlib seaborn -q               # charts
+
+print("✓ All libraries installed successfully!")
+
+====
+
+import cv2
+import numpy as np
+import time
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import seaborn as sns
+from google.colab import files
+from scipy import signal
+from moviepy.editor import VideoFileClip, AudioFileClip
+import librosa
+import os
+from IPython.display import Video, display, Image as IPImage
+
+# MediaPipe
+import mediapipe as mp
+from mediapipe.tasks import python
+from mediapipe.tasks.python import vision
+
+# TensorFlow / MoveNet
+import tensorflow as tf
+import tensorflow_hub as hub
+
+# YOLOv8
+from ultralytics import YOLO
+
+print("✓ All libraries imported successfully!")
+print(f"  MediaPipe  : {mp.__version__}")
+print(f"  TensorFlow : {tf.__version__}")
+
+====
+
+# ─── Model Registry ──────────────────────────────────────────────────────────
+# We support 4 models. Each wraps its inference into a common interface that
+# returns a list of 17 (x,y,confidence) tuples in COCO keypoint order, or None.
+#
+# COCO-17 keypoint order:
+#  0: nose     1: left_eye   2: right_eye  3: left_ear   4: right_ear
+#  5: L.shldr  6: R.shldr   7: L.elbow    8: R.elbow    9: L.wrist  10: R.wrist
+# 11: L.hip   12: R.hip    13: L.knee    14: R.knee    15: L.ankle  16: R.ankle
+
+# ── MediaPipe → COCO-17 mapping (MediaPipe 33-kpt indices) ───────────────────
+MP_TO_COCO17 = [0, 2, 5, 7, 8, 11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28]
+
+def mp_landmarks_to_coco17(mp_lm_list):
+    """Convert MediaPipe NormalizedLandmark list → (17,3) numpy array (x,y,vis)."""
+    if mp_lm_list is None:
+        return None
+    pts = []
+    for coco_i, mp_i in enumerate(MP_TO_COCO17):
+        lm = mp_lm_list[mp_i]
+        pts.append([lm.x, lm.y, getattr(lm, 'visibility', 1.0)])
+    return np.array(pts, dtype=np.float32)
+
+# ── MoveNet helpers ───────────────────────────────────────────────────────────
+_movenet_lightning = None
+_movenet_thunder   = None
+
+def _load_movenet_lightning():
+    global _movenet_lightning
+    if _movenet_lightning is None:
+        print("  Loading MoveNet Lightning from TF Hub...")
+        _movenet_lightning = hub.load("https://tfhub.dev/google/movenet/singlepose/lightning/4")
+    return _movenet_lightning
+
+def _load_movenet_thunder():
+    global _movenet_thunder
+    if _movenet_thunder is None:
+        print("  Loading MoveNet Thunder from TF Hub...")
+        _movenet_thunder = hub.load("https://tfhub.dev/google/movenet/singlepose/thunder/4")
+    return _movenet_thunder
+
+def _movenet_infer(model, frame_bgr, input_size):
+    """Run a MoveNet model on one BGR frame. Returns (17,3) array or None."""
+    rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+    img = tf.image.resize_with_pad(tf.expand_dims(rgb, axis=0), input_size, input_size)
+    img = tf.cast(img, dtype=tf.int32)
+    outputs = model.signatures['serving_default'](img)
+    kpts = outputs['output_0'].numpy()[0, 0]          # (17, 3) → y,x,conf
+    # Convert from (y,x,conf) → (x,y,conf)
+    result = np.stack([kpts[:, 1], kpts[:, 0], kpts[:, 2]], axis=1)
+    if result[:, 2].mean() < 0.1:                    # very low overall confidence
+        return None
+    return result.astype(np.float32)
+
+# ── YOLOv8 Pose helpers ───────────────────────────────────────────────────────
+_yolo_model = None
+
+def _load_yolo():
+    global _yolo_model
+    if _yolo_model is None:
+        print("  Loading YOLOv8n-Pose...")
+        _yolo_model = YOLO('yolov8n-pose.pt')
+    return _yolo_model
+
+def _yolo_infer(frame_bgr, anchor_centroid=None):
+    """
+    Run YOLOv8-Pose on one BGR frame.
+    When multiple people detected:
+      - If anchor_centroid (x,y normalised) provided → pick person whose centroid
+        is closest to the anchor (temporal consistency).
+      - Otherwise → pick person with highest mean keypoint confidence.
+    Returns (17,3) [x_norm, y_norm, conf] or None.
+    """
+    model = _load_yolo()
+    results = model(frame_bgr, verbose=False)
+    if not results or results[0].keypoints is None:
+        return None
+    kps = results[0].keypoints
+    n_persons = kps.data.shape[0]
+    if n_persons == 0:
+        return None
+
+    h, w = frame_bgr.shape[:2]
+    best_idx  = 0
+    best_score = -1.0
+
+    for pi in range(n_persons):
+        kp_raw = kps.data[pi].cpu().numpy().copy()
+        kp_raw[:, 0] /= w
+        kp_raw[:, 1] /= h
+        mean_conf = float(kp_raw[:, 2].mean())
+        if anchor_centroid is not None:
+            # score = conf - distance_to_anchor (prefer close + confident)
+            centroid = kp_raw[:, :2].mean(axis=0)
+            dist = float(np.linalg.norm(centroid - anchor_centroid))
+            score = mean_conf - 0.5 * dist
+        else:
+            score = mean_conf
+        if score > best_score:
+            best_score = score
+            best_idx   = pi
+
+    kp = kps.data[best_idx].cpu().numpy().copy()
+    kp[:, 0] /= w
+    kp[:, 1] /= h
+    if kp[:, 2].mean() < 0.1:
+        return None
+    return kp.astype(np.float32)
+
+# ── Unified inference interface ───────────────────────────────────────────────
+MODELS = {
+    'MediaPipe BlazePose': None,   # set up below
+    'MoveNet Lightning'  : None,
+    'MoveNet Thunder'    : None,
+    'YOLOv8n-Pose'       : None,
+}
+
+# Lazy-load on first benchmark call (see next cell)
+print("✓ Model registry ready. Models will load on demand during benchmarking.")
+
+====
+
+## ─── Step 6b: Multi-Model Accuracy Benchmark ────────────────────────────────
+import time, warnings
+warnings.filterwarnings('ignore')
+
+SAMPLE_FRAMES = 60          # frames to benchmark per model (increase for better estimate)
+BENCHMARK_VIDEO = video1_path
+
+# ── Collect sample frames ─────────────────────────────────────────────────────
+cap = cv2.VideoCapture(BENCHMARK_VIDEO)
+total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+step  = max(1, total // SAMPLE_FRAMES)
+sample_bgr = []
+fi = 0
+while cap.isOpened() and len(sample_bgr) < SAMPLE_FRAMES:
+    ret, frame = cap.read()
+    if not ret: break
+    if fi % step == 0:
+        sample_bgr.append(frame)
+    fi += 1
+cap.release()
+print(f"✓ Sampled {len(sample_bgr)} frames for benchmarking.")
+
+
+# ── MediaPipe inference on samples ───────────────────────────────────────────
+def benchmark_mediapipe(frames, mp_model_path):
+    base_options = python.BaseOptions(model_asset_path=mp_model_path)
+    options = vision.PoseLandmarkerOptions(
+        base_options=base_options,
+        running_mode=vision.RunningMode.IMAGE,
+        num_poses=1,
+        min_pose_detection_confidence=0.3,
+    )
+    det, confs = 0, []
+    kpt_traj = []
+    t0 = time.time()
+    with vision.PoseLandmarker.create_from_options(options) as lm:
+        for frame in frames:
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+            res = lm.detect(mp_img)
+            if res.pose_landmarks:
+                kp17 = mp_landmarks_to_coco17(res.pose_landmarks[0])
+                det  += 1
+                vis = [getattr(res.pose_landmarks[0][i], 'visibility', 1.0) for i in range(33)]
+                confs.append(np.mean(vis))
+                kpt_traj.append(kp17[:, :2])
+            else:
+                kpt_traj.append(None)
+    fps_speed = len(frames) / (time.time() - t0 + 1e-8)
+    det_rate = det / len(frames)
+    avg_conf = np.mean(confs) if confs else 0.0
+    # temporal smoothness
+    smooth = _smoothness(kpt_traj)
+    return det_rate, avg_conf, smooth, fps_speed
+
+def _smoothness(traj):
+    """Mean 1-normalised jitter across consecutive detected frames."""
+    valid = [k for k in traj if k is not None]
+    if len(valid) < 2: return 0.0
+    diffs = [np.mean(np.linalg.norm(valid[i+1] - valid[i], axis=1))
+             for i in range(len(valid)-1)]
+    # clamp: diff>0.5 is basically noise; map 0→1 (perfect)
+    return float(np.mean([max(0, 1 - d/0.5) for d in diffs]))
+
+
+# ── MoveNet inference on samples ─────────────────────────────────────────────
+def benchmark_movenet(frames, loader_fn, input_size):
+    model = loader_fn()
+    det, confs = 0, []
+    kpt_traj = []
+    t0 = time.time()
+    for frame in frames:
+        kp = _movenet_infer(model, frame, input_size)
+        if kp is not None:
+            det += 1
+            confs.append(float(kp[:, 2].mean()))
+            kpt_traj.append(kp[:, :2])
+        else:
+            kpt_traj.append(None)
+    fps_speed = len(frames) / (time.time() - t0 + 1e-8)
+    return det/len(frames), np.mean(confs) if confs else 0, _smoothness(kpt_traj), fps_speed
+
+
+# ── YOLOv8 inference on samples ──────────────────────────────────────────────
+def benchmark_yolo(frames):
+    det, confs = 0, []
+    kpt_traj = []
+    t0 = time.time()
+    for frame in frames:
+        kp = _yolo_infer(frame)
+        if kp is not None:
+            det += 1
+            confs.append(float(kp[:, 2].mean()))
+            kpt_traj.append(kp[:, :2])
+        else:
+            kpt_traj.append(None)
+    fps_speed = len(frames) / (time.time() - t0 + 1e-8)
+    return det/len(frames), np.mean(confs) if confs else 0, _smoothness(kpt_traj), fps_speed
+
+
+# ── Run all benchmarks ────────────────────────────────────────────────────────
+benchmark_results = {}
+
+print("\n[1/4] Benchmarking MediaPipe BlazePose Heavy...")
+benchmark_results['MediaPipe BlazePose'] = benchmark_mediapipe(sample_bgr, model_path)
+print(f"      Det: {benchmark_results['MediaPipe BlazePose'][0]:.1%}  Conf: {benchmark_results['MediaPipe BlazePose'][1]:.3f}  Smooth: {benchmark_results['MediaPipe BlazePose'][2]:.3f}  FPS: {benchmark_results['MediaPipe BlazePose'][3]:.1f}")
+
+print("\n[2/4] Benchmarking MoveNet Lightning (192px)...")
+benchmark_results['MoveNet Lightning'] = benchmark_movenet(sample_bgr, _load_movenet_lightning, 192)
+print(f"      Det: {benchmark_results['MoveNet Lightning'][0]:.1%}  Conf: {benchmark_results['MoveNet Lightning'][1]:.3f}  Smooth: {benchmark_results['MoveNet Lightning'][2]:.3f}  FPS: {benchmark_results['MoveNet Lightning'][3]:.1f}")
+
+print("\n[3/4] Benchmarking MoveNet Thunder (256px)...")
+benchmark_results['MoveNet Thunder'] = benchmark_movenet(sample_bgr, _load_movenet_thunder, 256)
+print(f"      Det: {benchmark_results['MoveNet Thunder'][0]:.1%}  Conf: {benchmark_results['MoveNet Thunder'][1]:.3f}  Smooth: {benchmark_results['MoveNet Thunder'][2]:.3f}  FPS: {benchmark_results['MoveNet Thunder'][3]:.1f}")
+
+print("\n[4/4] Benchmarking YOLOv8n-Pose...")
+benchmark_results['YOLOv8n-Pose'] = benchmark_yolo(sample_bgr)
+print(f"      Det: {benchmark_results['YOLOv8n-Pose'][0]:.1%}  Conf: {benchmark_results['YOLOv8n-Pose'][1]:.3f}  Smooth: {benchmark_results['YOLOv8n-Pose'][2]:.3f}  FPS: {benchmark_results['YOLOv8n-Pose'][3]:.1f}")
+
+print("\n✓ Benchmarking complete!")
+
+====
+
+## ─── Step 6c: Generate Comparison Charts ────────────────────────────────────
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import numpy as np
+
+model_names   = list(benchmark_results.keys())
+det_rates     = [benchmark_results[m][0] * 100 for m in model_names]
+avg_confs     = [benchmark_results[m][1] * 100 for m in model_names]
+smoothness    = [benchmark_results[m][2] * 100 for m in model_names]
+fps_vals      = [benchmark_results[m][3]        for m in model_names]
+
+# ── Composite score (weighted) ────────────────────────────────────────────────
+# Weight: detection=35%, confidence=30%, smoothness=25%, speed=10%
+fps_norm = [min(f / max(fps_vals + [1]), 1.0) * 100 for f in fps_vals]
+composite = [0.35*d + 0.30*c + 0.25*s + 0.10*f
+             for d, c, s, f in zip(det_rates, avg_confs, smoothness, fps_norm)]
+
+PALETTE = ['#4f86c6', '#f4a261', '#2a9d8f', '#e76f51']
+short   = ['MediaPipe', 'MoveNet-L', 'MoveNet-T', 'YOLOv8n']
+
+fig, axes = plt.subplots(2, 3, figsize=(16, 9))
+fig.patch.set_facecolor('#0f0f1a')
+for ax in axes.flat:
+    ax.set_facecolor('#1a1a2e')
+    ax.tick_params(colors='#cccccc', labelsize=9)
+    for spine in ax.spines.values():
+        spine.set_edgecolor('#444466')
+
+def bar_chart(ax, values, title, unit='%', ylim=None):
+    bars = ax.bar(short, values, color=PALETTE, edgecolor='#ffffff22', linewidth=0.5)
+    ax.set_title(title, color='white', fontsize=11, fontweight='bold', pad=8)
+    ax.set_ylim(ylim or (0, 105))
+    ax.set_ylabel(unit, color='#aaaacc', fontsize=8)
+    for bar, v in zip(bars, values):
+        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1.5,
+                f'{v:.1f}{"%" if unit=="%"  else " fps"}',
+                ha='center', va='bottom', color='white', fontsize=8, fontweight='bold')
+    ax.set_xticks(range(len(short)))
+    ax.set_xticklabels(short, color='#cccccc', fontsize=8)
+    # Highlight winner
+    best = values.index(max(values))
+    bars[best].set_edgecolor('#ffd700')
+    bars[best].set_linewidth(2.5)
+
+bar_chart(axes[0,0], det_rates,  'Detection Rate',        '%')
+bar_chart(axes[0,1], avg_confs,  'Avg Keypoint Confidence','%')
+bar_chart(axes[0,2], smoothness, 'Temporal Smoothness',   '%')
+bar_chart(axes[1,0], fps_vals,   'Inference Speed',       'fps', ylim=(0, max(fps_vals)*1.2))
+
+# ── Radar / spider chart ──────────────────────────────────────────────────────
+ax_radar = axes[1, 1]
+ax_radar.remove()
+ax_radar = fig.add_subplot(2, 3, 5, polar=True)
+ax_radar.set_facecolor('#1a1a2e')
+categories = ['Detection', 'Confidence', 'Smoothness', 'Speed', 'Composite']
+N = len(categories)
+angles = [n / float(N) * 2 * np.pi for n in range(N)]
+angles += angles[:1]
+
+ax_radar.set_theta_offset(np.pi / 2)
+ax_radar.set_theta_direction(-1)
+ax_radar.set_xticks(angles[:-1])
+ax_radar.set_xticklabels(categories, color='#cccccc', size=8)
+ax_radar.set_ylim(0, 100)
+ax_radar.set_yticks([25, 50, 75, 100])
+ax_radar.set_yticklabels(['25', '50', '75', '100'], color='#888888', size=6)
+ax_radar.spines['polar'].set_color('#444466')
+ax_radar.grid(color='#333355', linewidth=0.5)
+ax_radar.set_title('Radar Comparison', color='white', fontsize=11, fontweight='bold', pad=15)
+
+for i, (name, col) in enumerate(zip(model_names, PALETTE)):
+    vals = [det_rates[i], avg_confs[i], smoothness[i], fps_norm[i], composite[i]]
+    vals += vals[:1]
+    ax_radar.plot(angles, vals, color=col, linewidth=2, linestyle='solid')
+    ax_radar.fill(angles, vals, color=col, alpha=0.15)
+
+# ── Composite bar ─────────────────────────────────────────────────────────────
+bar_chart(axes[1,2], composite, 'Composite Score (Best → Used)', '%')
+
+# ── Legend ────────────────────────────────────────────────────────────────────
+patches = [mpatches.Patch(color=c, label=n) for c, n in zip(PALETTE, model_names)]
+fig.legend(handles=patches, loc='upper center', ncol=4,
+           framealpha=0.2, edgecolor='#666688',
+           labelcolor='white', fontsize=9, bbox_to_anchor=(0.5, 0.98))
+
+fig.suptitle('Pose Estimation Model Comparison — Dance Sync Feedback',
+             color='white', fontsize=14, fontweight='bold', y=1.01)
+plt.tight_layout()
+plt.savefig('model_comparison_chart.png', dpi=150,
+            bbox_inches='tight', facecolor='#0f0f1a')
+plt.show()
+print("✓ Chart saved → model_comparison_chart.png")
+
+# ── Print summary table ───────────────────────────────────────────────────────
+print("\n┌─────────────────────┬────────────┬────────────┬────────────┬──────────┬───────────┐")
+print("│ Model               │ Detection  │ Confidence │ Smoothness │  Speed   │ Composite │")
+print("├─────────────────────┼────────────┼────────────┼────────────┼──────────┼───────────┤")
+for m, d, c, s, f, comp in zip(model_names, det_rates, avg_confs, smoothness, fps_vals, composite):
+    print(f"│ {m:<19} │ {d:>8.1f}%  │ {c:>8.1f}%  │ {s:>8.1f}%  │ {f:>6.1f}fps│ {comp:>7.1f}%  │")
+print("└─────────────────────┴────────────┴────────────┴────────────┴──────────┴───────────┘")
+
+====
+
+## ─── Step 6d: Auto-Select Best Model ────────────────────────────────────────
+
+best_model_name = model_names[composite.index(max(composite))]
+print(f"🏆 Best model selected: {best_model_name}")
+print(f"   Composite Score: {max(composite):.1f}%")
+print()
+print("This model will now be used for all pose landmark extraction")
+print("and dance matching calculations.")
+
+# ── Define unified extract function for the chosen model ─────────────────────
+
+def extract_frame_kp17(frame_bgr, model_name, mp_landmarker=None, frame_idx=0, fps=30):
+    """
+    Extract COCO-17 keypoints from a single BGR frame using the specified model.
+    Returns (17,3) numpy array [x_norm, y_norm, confidence] or None.
+    """
+    if model_name == 'MediaPipe BlazePose':
+        if mp_landmarker is None:
+            return None
+        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        ts_ms = int((frame_idx / fps) * 1000)
+        res = mp_landmarker.detect_for_video(mp_img, ts_ms)
+        if res.pose_landmarks:
+            return mp_landmarks_to_coco17(res.pose_landmarks[0])
+        return None
+
+    elif model_name == 'MoveNet Lightning':
+        model = _load_movenet_lightning()
+        return _movenet_infer(model, frame_bgr, 192)
+
+    elif model_name == 'MoveNet Thunder':
+        model = _load_movenet_thunder()
+        return _movenet_infer(model, frame_bgr, 256)
+
+    elif model_name == 'YOLOv8n-Pose':
+        return _yolo_infer(frame_bgr)
+
+    return None
+
+# ── COCO-17 body part groupings (indices) ────────────────────────────────────
+# Used by the pose comparison engine (replaces MediaPipe-only BODY_PARTS)
+BODY_PARTS_17 = {
+    'Left Arm':  [5, 7, 9],       # L-shoulder, L-elbow, L-wrist
+    'Right Arm': [6, 8, 10],      # R-shoulder, R-elbow, R-wrist
+    'Left Leg':  [11, 13, 15],    # L-hip, L-knee, L-ankle
+    'Right Leg': [12, 14, 16],    # R-hip, R-knee, R-ankle
+    'Torso':     [5, 6, 11, 12],  # shoulders + hips
+}
+
+COCO17_CONNECTIONS = [
+    (0,1),(0,2),(1,3),(2,4),               # face
+    (5,6),(5,7),(7,9),(6,8),(8,10),        # arms
+    (5,11),(6,12),(11,12),                 # torso
+    (11,13),(13,15),(12,14),(14,16),       # legs
+]
+
+print(f"\n✓ Using COCO-17 body parts for comparison engine.")
+print(f"  Body parts: {list(BODY_PARTS_17.keys())}")
+# ─────────────────────────────────────────────────────────────────────────────
+# StablePoseTracker
+# Wraps any model's raw kp17 output with:
+#   1. Person anchoring  – on YOLO multi-person frames, pick the person
+#      whose centroid is closest to the last known centroid.
+#   2. EMA smoothing     – exponential moving average on x,y to remove jitter.
+#   3. Jump rejection    – if centroid shifts more than `jump_threshold`
+#      (normalised coords, ~0.25 = 25% of frame), discard and reuse last good.
+#   4. Freeze cap        – if pose lost for > MAX_FREEZE frames, fully reset
+#      so we don't stick to a stale ghost skeleton.
+# ─────────────────────────────────────────────────────────────────────────────
+class StablePoseTracker:
+    MAX_FREEZE = 10   # frames to hold last pose before giving up
+
+    def __init__(self, ema_alpha=0.60, jump_threshold=0.25):
+        """
+        ema_alpha      : how much weight to give the NEW frame (0=frozen, 1=raw).
+                         0.60 gives smooth tracking while staying responsive.
+        jump_threshold : max centroid shift (normalised) before frame is rejected.
+        """
+        self.ema_alpha       = ema_alpha
+        self.jump_threshold  = jump_threshold
+        self._prev_kp        = None   # last accepted + smoothed kp17 (17,3)
+        self._prev_centroid  = None   # centroid of _prev_kp
+        self._freeze_count   = 0      # consecutive frames without a good detection
+
+    # ── public interface ──────────────────────────────────────────────────────
+    def update(self, raw_kp17):
+        """
+        Feed raw kp17 (17,3) or None.
+        Returns stabilised kp17 (17,3) or None.
+        """
+        # ── No detection ─────────────────────────────────────────────────────
+        if raw_kp17 is None:
+            self._freeze_count += 1
+            if self._freeze_count > self.MAX_FREEZE:
+                self.reset()
+                return None
+            return self._prev_kp       # hold last good frame
+
+        # ── Ignore low-confidence detections ─────────────────────────────────
+        conf_mask = raw_kp17[:, 2] > 0.15
+        if conf_mask.sum() < 5:
+            self._freeze_count += 1
+            return self._prev_kp
+
+        centroid = raw_kp17[conf_mask, :2].mean(axis=0)
+
+        # ── Jump rejection ────────────────────────────────────────────────────
+        if self._prev_centroid is not None:
+            shift = float(np.linalg.norm(centroid - self._prev_centroid))
+            if shift > self.jump_threshold:
+                # Large jump → likely switched to a different person.
+                # Reject this frame and keep last good pose.
+                self._freeze_count += 1
+                return self._prev_kp
+
+        # ── EMA smoothing ─────────────────────────────────────────────────────
+        smoothed = raw_kp17.copy()
+        if self._prev_kp is not None:
+            a = self.ema_alpha
+            smoothed[:, :2] = a * raw_kp17[:, :2] + (1.0 - a) * self._prev_kp[:, :2]
+            # keep original confidence values (not smoothed)
+            smoothed[:, 2]  = raw_kp17[:, 2]
+
+        self._prev_kp       = smoothed
+        self._prev_centroid = smoothed[:, :2].mean(axis=0)
+        self._freeze_count  = 0
+        return smoothed
+
+    def get_anchor(self):
+        """Return current centroid for YOLO person selection (or None)."""
+        return self._prev_centroid
+
+    def reset(self):
+        self._prev_kp       = None
+        self._prev_centroid = None
+        self._freeze_count  = 0
+
+
+print("✓ StablePoseTracker defined (EMA smoothing + jump rejection + person anchoring)")
+
+
+====
+
+## ─── Step 7: Extract Landmarks & Draw Skeletons with Best Model ─────────────
+
+POSE_CONNECTIONS = COCO17_CONNECTIONS    # for skeleton drawing
+
+def draw_kp17(image, kp17, connections, joint_colors=None):
+    """Draw COCO-17 skeleton on image."""
+    if kp17 is None:
+        return image
+    h, w = image.shape[:2]
+    pts = [(int(kp17[i,0]*w), int(kp17[i,1]*h)) for i in range(17)]
+    for s, e in connections:
+        if (0 <= pts[s][0] < w and 0 <= pts[s][1] < h and
+                0 <= pts[e][0] < w and 0 <= pts[e][1] < h):
+            cv2.line(image, pts[s], pts[e], (0, 255, 0), 2)
+    for i, pt in enumerate(pts):
+        if 0 <= pt[0] < w and 0 <= pt[1] < h:
+            col = joint_colors[i] if joint_colors and i < len(joint_colors) else (0, 0, 255)
+            cv2.circle(image, pt, 5, col, -1)
+    return image
+
+
+def _raw_extract(frame_bgr, model_name, mp_landmarker, frame_idx, fps, tracker):
+    """
+    Get RAW kp17 from the chosen model for ONE frame.
+    Passes tracker.get_anchor() to YOLO for person-consistency selection.
+    """
+    if model_name == 'MediaPipe BlazePose':
+        if mp_landmarker is None:
+            return None
+        rgb    = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        ts_ms  = int((frame_idx / fps) * 1000)
+        res    = mp_landmarker.detect_for_video(mp_img, ts_ms)
+        if res.pose_landmarks:
+            return mp_landmarks_to_coco17(res.pose_landmarks[0])
+        return None
+
+    elif model_name == 'MoveNet Lightning':
+        return _movenet_infer(_load_movenet_lightning(), frame_bgr, 192)
+
+    elif model_name == 'MoveNet Thunder':
+        return _movenet_infer(_load_movenet_thunder(), frame_bgr, 256)
+
+    elif model_name == 'YOLOv8n-Pose':
+        anchor = tracker.get_anchor() if tracker else None
+        return _yolo_infer(frame_bgr, anchor_centroid=anchor)
+
+    return None
+
+
+def extract_and_draw_video(input_video_path, output_video_path,
+                            chosen_model_name, mp_model_path):
+    """
+    Run chosen model on every frame, stabilise with StablePoseTracker,
+    draw skeleton, return per-frame kp17 list.
+    """
+    # ── Setup MediaPipe VIDEO-mode landmarker if needed ───────────────────────
+    mp_landmarker = None
+    mp_ctx        = None
+    if chosen_model_name == 'MediaPipe BlazePose':
+        base_options = python.BaseOptions(model_asset_path=mp_model_path)
+        options = vision.PoseLandmarkerOptions(
+            base_options=base_options,
+            running_mode=vision.RunningMode.VIDEO,
+            num_poses=1,
+            min_pose_detection_confidence=0.5,
+            min_pose_presence_confidence=0.5,
+            min_tracking_confidence=0.5,
+        )
+        mp_ctx        = vision.PoseLandmarker.create_from_options(options)
+        mp_landmarker = mp_ctx.__enter__()
+
+    cap          = cv2.VideoCapture(input_video_path)
+    orig_fps     = int(cap.get(cv2.CAP_PROP_FPS)) or 30
+    target_fps   = 30
+    width        = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height       = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out    = cv2.VideoWriter(output_video_path, fourcc, target_fps, (width, height))
+
+    # ── One tracker per video — resets are per-video, not per-frame ───────────
+    tracker  = StablePoseTracker(ema_alpha=0.60, jump_threshold=0.25)
+
+    all_kp17  = []
+    frame_idx = 0
+    out_cnt   = 0
+
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        # 1. Raw inference
+        raw_kp17 = _raw_extract(frame, chosen_model_name,
+                                 mp_landmarker, frame_idx, orig_fps, tracker)
+
+        # 2. Stabilise: EMA + jump rejection + person anchoring
+        stable_kp17 = tracker.update(raw_kp17)
+
+        # 3. Draw (stable) skeleton on frame
+        annotated = frame.copy()
+        if stable_kp17 is not None:
+            annotated = draw_kp17(annotated, stable_kp17, COCO17_CONNECTIONS)
+        all_kp17.append(stable_kp17)
+
+        # 4. Write output frames at target_fps
+        while (out_cnt / target_fps) < ((frame_idx + 1) / orig_fps):
+            out.write(annotated)
+            out_cnt += 1
+        if frame_idx % orig_fps == 0:
+            pct = frame_idx / max(total_frames, 1) * 100
+            print(f'\r  Processing: {pct:.0f}%  ({frame_idx}/{total_frames})', end='')
+        frame_idx += 1
+
+    cap.release()
+    out.release()
+    if mp_ctx is not None:
+        mp_ctx.__exit__(None, None, None)
+    print(f'\r  ✓ Done: {frame_idx} frames → {out_cnt} output frames           ')
+    return all_kp17
+
+
+skeleton_video1 = 'video1_skeleton.mp4'
+skeleton_video2 = 'video2_skeleton.mp4'
+
+print(f"Using model: {best_model_name}\n")
+
+print('Processing Video 1 (Teacher/Reference)...')
+kp17_v1 = extract_and_draw_video(video1_path, skeleton_video1, best_model_name, model_path)
+
+print('\nProcessing Video 2 (Student)...')
+kp17_v2 = extract_and_draw_video(video2_path, skeleton_video2, best_model_name, model_path)
+
+print(f'\n✓ Landmark extraction complete!')
+print(f'  Video 1: {len(kp17_v1)} frames  ({sum(1 for k in kp17_v1 if k is not None)} with stable pose)')
+print(f'  Video 2: {len(kp17_v2)} frames  ({sum(1 for k in kp17_v2 if k is not None)} with stable pose)')

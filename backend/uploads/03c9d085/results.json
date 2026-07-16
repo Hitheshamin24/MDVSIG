@@ -1,0 +1,47 @@
+{
+  "status": "complete",
+  "best_model": "YOLOv8n-Pose",
+  "audio_offset": -0.20068027210884354,
+  "overall_score": 58.3,
+  "part_scores": {
+    "Left Arm": 42.1,
+    "Right Arm": 41.4,
+    "Left Leg": 65.0,
+    "Right Leg": 65.0,
+    "Torso": 77.9
+  },
+  "benchmark": {
+    "MediaPipe BlazePose": {
+      "detection_rate": 100.0,
+      "confidence": 82.6,
+      "smoothness": 67.5,
+      "fps": 3.3,
+      "composite": 86.4
+    },
+    "MoveNet Lightning": {
+      "detection_rate": 100.0,
+      "confidence": 47.4,
+      "smoothness": 80.2,
+      "fps": 1.2,
+      "composite": 72.7
+    },
+    "MoveNet Thunder": {
+      "detection_rate": 100.0,
+      "confidence": 47.5,
+      "smoothness": 81.6,
+      "fps": 0.4,
+      "composite": 70.8
+    },
+    "YOLOv8n-Pose": {
+      "detection_rate": 100.0,
+      "confidence": 89.9,
+      "smoothness": 61.5,
+      "fps": 3.4,
+      "composite": 87.3
+    }
+  },
+  "output_video": "merged_dance_with_feedback.mp4",
+  "chart_image": "model_comparison_chart.png",
+  "video1_frames": 1629,
+  "video2_frames": 1690
+}
