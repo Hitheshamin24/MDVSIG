@@ -39,6 +39,7 @@ def _normalize_video(input_path, output_path):
     cmd = [
         imageio_ffmpeg.get_ffmpeg_exe(), '-y', '-i', input_path,
         '-vf', 'fps=30', '-vsync', 'cfr',
+        '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23',
         output_path
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -221,19 +222,16 @@ def run_pipeline(video1_path, video2_path, job_dir, progress_callback=None):
     report('benchmark', 100, f'Model selected: {best_model_name}')
 
     # ── Step 4: Extract keypoints ─────────────────────────────────────────────
-    skel_v1 = os.path.join(job_dir, 'video1_skeleton.mp4')
-    skel_v2 = os.path.join(job_dir, 'video2_skeleton.mp4')
-
     report('extract_v1', 0, 'Extracting keypoints from Video 1 (Teacher)...')
     kp17_v1 = extract_and_draw_video(
-        v1_fixed, skel_v1, best_model_name, mp_model_path,
+        v1_fixed, None, best_model_name, mp_model_path,
         progress_callback=lambda pct: report('extract_v1', pct, '')
     )
     report('extract_v1', 100, f'{len(kp17_v1)} frames processed.')
 
     report('extract_v2', 0, 'Extracting keypoints from Video 2 (Student)...')
     kp17_v2 = extract_and_draw_video(
-        v2_fixed, skel_v2, best_model_name, mp_model_path,
+        v2_fixed, None, best_model_name, mp_model_path,
         progress_callback=lambda pct: report('extract_v2', pct, '')
     )
     report('extract_v2', 100, f'{len(kp17_v2)} frames processed.')
@@ -247,12 +245,13 @@ def run_pipeline(video1_path, video2_path, job_dir, progress_callback=None):
     output_video = os.path.join(job_dir, 'merged_dance_with_feedback.mp4')
     report('merge', 0, 'Merging videos with feedback overlay...')
     merge_with_feedback(
-        skel_v1, skel_v2, kp17_v1, kp17_v2,
+        v1_fixed, v2_fixed, kp17_v1, kp17_v2,
         offset, output_video, audio1,
         model_name=best_model_name,
         progress_callback=lambda pct: report('merge', pct, '')
     )
     report('merge', 100, 'Merge complete!')
+
 
     # ── Step 7: Build results ─────────────────────────────────────────────────
     report('done', 100, 'Processing complete!')

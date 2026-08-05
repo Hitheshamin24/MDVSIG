@@ -6,8 +6,9 @@ Extracted from notebook cell 14.
 
 import os
 import cv2
+import subprocess
+import imageio_ffmpeg
 import numpy as np
-from moviepy.editor import VideoFileClip, AudioFileClip
 
 from pose_comparison import (
     BODY_PARTS_17, compare_frames, get_joint_colors_17,
@@ -105,27 +106,31 @@ def merge_with_feedback(vid1_path, vid2_path, kp_v1, kp_v2,
     blank1 = np.zeros((h_target, w1_r, 3), dtype=np.uint8)
     blank2 = np.zeros((h_target, w2_r, 3), dtype=np.uint8)
 
-    # Read all frames into memory
-    all_f1, all_f2 = [], []
-    while True:
-        ret, f = cap1.read()
-        if not ret:
-            break
-        all_f1.append(cv2.resize(f, (w1_r, h_target)))
-    while True:
-        ret, f = cap2.read()
-        if not ret:
-            break
-        all_f2.append(cv2.resize(f, (w2_r, h_target)))
-    cap1.release()
-    cap2.release()
+    all_f1 = []
+    all_f2 = []
+
+    def get_f1(idx):
+        while len(all_f1) <= idx and cap1.isOpened():
+            ret, f = cap1.read()
+            if not ret:
+                break
+            all_f1.append(cv2.resize(f, (w1_r, h_target)))
+        return all_f1[idx] if 0 <= idx < len(all_f1) else blank1.copy()
+
+    def get_f2(idx):
+        while len(all_f2) <= idx and cap2.isOpened():
+            ret, f = cap2.read()
+            if not ret:
+                break
+            all_f2.append(cv2.resize(f, (w2_r, h_target)))
+        return all_f2[idx] if 0 <= idx < len(all_f2) else blank2.copy()
 
     # Render merged frames
     for out_i in range(total_out):
         i1 = out_i
         i2 = out_i - offset_frames
-        f1 = all_f1[i1] if 0 <= i1 < len(all_f1) else blank1.copy()
-        f2 = all_f2[i2] if 0 <= i2 < len(all_f2) else blank2.copy()
+        f1 = get_f1(i1)
+        f2 = get_f2(i2)
         k1 = kp_v1[i1] if 0 <= i1 < len(kp_v1) else None
         k2 = kp_v2[i2] if 0 <= i2 < len(kp_v2) else None
         scores = compare_frames(k1, k2)
@@ -144,26 +149,35 @@ def merge_with_feedback(vid1_path, vid2_path, kp_v1, kp_v2,
             pct = 100 * out_i / max(total_out, 1)
             progress_callback(pct)
 
+    cap1.release()
+    cap2.release()
     writer.release()
 
-    # Add audio from teacher video
-    try:
-        v = VideoFileClip(tmp_out)
-        a = AudioFileClip(audio1_path)
-        a = a.subclip(0, min(a.duration, v.duration))
-        v.set_audio(a).write_videofile(
-            output_path, codec='libx264', audio_codec='aac',
-            fps=FPS, preset='medium', threads=4, logger=None
-        )
-        v.close()
-        a.close()
-        os.remove(tmp_out)
-    except Exception:
-        # If audio fails, just rename the temp file
-        if os.path.exists(tmp_out):
-            if os.path.exists(output_path):
-                os.remove(output_path)
-            os.rename(tmp_out, output_path)
+    # Add audio from teacher video using direct FFmpeg subprocess (ultra-fast)
+    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+    if os.path.exists(audio1_path) and os.path.getsize(audio1_path) > 0:
+        cmd = [
+            ffmpeg_exe, '-y',
+            '-i', tmp_out,
+            '-i', audio1_path,
+            '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23',
+            '-c:a', 'aac', '-shortest',
+            output_path
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            if os.path.exists(tmp_out):
+                os.remove(tmp_out)
+        else:
+            if os.path.exists(tmp_out):
+                if os.path.exists(output_path):
+                    os.remove(output_path)
+                os.rename(tmp_out, output_path)
+    else:
+        if os.path.exists(output_path):
+            os.remove(output_path)
+        os.rename(tmp_out, output_path)
 
     if progress_callback:
         progress_callback(100.0)
+

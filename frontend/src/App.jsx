@@ -1,78 +1,69 @@
+// App.jsx — StepSync root: routing + shared job state
 import { useState, useCallback } from 'react';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import './App.css';
-import Header from './components/Header';
-import VideoUpload from './components/VideoUpload';
-import ProcessingStatus from './components/ProcessingStatus';
-import ResultsView from './components/ResultsView';
 
-// App states: upload → processing → results | error
-const STATES = {
-  UPLOAD: 'upload',
-  PROCESSING: 'processing',
-  RESULTS: 'results',
-  ERROR: 'error',
-};
+import Header      from './components/Header';
+import StudioPage  from './pages/StudioPage';
+import ComparePage from './pages/ComparePage';
+import AuthPage    from './pages/AuthPage';
 
-function App() {
-  const [appState, setAppState] = useState(STATES.UPLOAD);
-  const [jobId, setJobId] = useState(null);
-  const [errorMsg, setErrorMsg] = useState('');
+export default function App() {
+  const [jobId,      setJobId]      = useState(null);
+  const [processing, setProcessing] = useState(false);
 
-  const handleUpload = useCallback((id) => {
+  const handleJobStart = useCallback((id) => {
     setJobId(id);
-    setAppState(STATES.PROCESSING);
+    setProcessing(true);
   }, []);
 
-  const handleComplete = useCallback(() => {
-    setAppState(STATES.RESULTS);
+  const handleProcessComplete = useCallback(() => {
+    setProcessing(false);
   }, []);
 
-  const handleError = useCallback((msg) => {
-    setErrorMsg(msg);
-    setAppState(STATES.ERROR);
+  const handleProcessError = useCallback((msg) => {
+    setProcessing(false);
+    console.error('Pipeline error:', msg);
   }, []);
 
   const handleReset = useCallback(() => {
     setJobId(null);
-    setErrorMsg('');
-    setAppState(STATES.UPLOAD);
+    setProcessing(false);
   }, []);
 
   return (
-    <>
+    <BrowserRouter>
       <Header />
-      <main className="app-main">
-        {appState === STATES.UPLOAD && (
-          <VideoUpload onUpload={handleUpload} />
-        )}
+      <Routes>
+        {/* Studio — upload page */}
+        <Route
+          path="/"
+          element={
+            <StudioPage onJobStart={handleJobStart} />
+          }
+        />
 
-        {appState === STATES.PROCESSING && (
-          <ProcessingStatus
-            jobId={jobId}
-            onComplete={handleComplete}
-            onError={handleError}
-          />
-        )}
+        {/* Compare — results + processing */}
+        <Route
+          path="/compare"
+          element={
+            <ComparePage
+              jobId={jobId}
+              processing={processing}
+              onProcessComplete={handleProcessComplete}
+              onProcessError={handleProcessError}
+              onReset={handleReset}
+            />
+          }
+        />
 
-        {appState === STATES.RESULTS && (
-          <ResultsView jobId={jobId} onReset={handleReset} />
-        )}
+        {/* Auth */}
+        <Route path="/auth"  element={<AuthPage />} />
+        <Route path="/login" element={<Navigate to="/auth" replace />} />
 
-        {appState === STATES.ERROR && (
-          <div className="processing-section">
-            <div className="error-card glass-panel">
-              <div className="error-icon">⚠️</div>
-              <h3>Processing Error</h3>
-              <p>{errorMsg}</p>
-              <button className="retry-btn" onClick={handleReset}>
-                ↻ Try Again
-              </button>
-            </div>
-          </div>
-        )}
-      </main>
-    </>
+        {/* Fallback */}
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </BrowserRouter>
   );
 }
-
-export default App;

@@ -8,6 +8,7 @@ All models output COCO-17 keypoints as (17,3) numpy arrays [x_norm, y_norm, conf
 import cv2
 import time
 import numpy as np
+import torch
 import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
@@ -97,7 +98,8 @@ def _yolo_infer(frame_bgr, anchor_centroid=None):
     Returns (17,3) [x_norm, y_norm, conf] or None.
     """
     model = _load_yolo()
-    results = model(frame_bgr, verbose=False)
+    with torch.inference_mode():
+        results = model(frame_bgr, verbose=False)
     if not results or results[0].keypoints is None:
         return None
     kps = results[0].keypoints
@@ -130,6 +132,58 @@ def _yolo_infer(frame_bgr, anchor_centroid=None):
     if kp[:, 2].mean() < 0.1:
         return None
     return kp.astype(np.float32)
+
+
+def _yolo_infer_batch(frames_bgr, tracker=None):
+    """
+    Run YOLOv8-Pose on a batch of BGR frames efficiently.
+    Returns a list of raw_kp17 arrays (one per frame) or None.
+    """
+    model = _load_yolo()
+    if not frames_bgr:
+        return []
+
+    with torch.inference_mode():
+        results = model(frames_bgr, verbose=False)
+
+    raw_kps = []
+    for frame_bgr, res in zip(frames_bgr, results):
+        if res is None or res.keypoints is None or res.keypoints.data is None or res.keypoints.data.shape[0] == 0:
+            raw_kps.append(None)
+            continue
+
+        kps = res.keypoints
+        n_persons = kps.data.shape[0]
+        h, w = frame_bgr.shape[:2]
+        anchor_centroid = tracker.get_anchor() if tracker else None
+
+        best_idx = 0
+        best_score = -1.0
+        for pi in range(n_persons):
+            kp_raw = kps.data[pi].cpu().numpy().copy()
+            kp_raw[:, 0] /= w
+            kp_raw[:, 1] /= h
+            mean_conf = float(kp_raw[:, 2].mean())
+            if anchor_centroid is not None:
+                centroid = kp_raw[:, :2].mean(axis=0)
+                dist = float(np.linalg.norm(centroid - anchor_centroid))
+                score = mean_conf - 0.5 * dist
+            else:
+                score = mean_conf
+            if score > best_score:
+                best_score = score
+                best_idx = pi
+
+        kp = kps.data[best_idx].cpu().numpy().copy()
+        kp[:, 0] /= w
+        kp[:, 1] /= h
+        if kp[:, 2].mean() < 0.1:
+            raw_kps.append(None)
+        else:
+            raw_kps.append(kp.astype(np.float32))
+
+    return raw_kps
+
 
 
 # ── Unified inference interface ───────────────────────────────────────────────

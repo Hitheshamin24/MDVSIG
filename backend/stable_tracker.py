@@ -136,18 +136,18 @@ def _raw_extract(frame_bgr, model_name, mp_landmarker, frame_idx, fps, tracker):
     return None
 
 
-# ── Full video extraction + skeleton drawing ──────────────────────────────────
+# ── Full video keypoint extraction (batched & optional output video) ─────────
 
-def extract_and_draw_video(input_video_path, output_video_path,
-                           chosen_model_name, mp_model_path,
-                           progress_callback=None):
+def extract_keypoints_video(input_video_path, output_video_path=None,
+                           chosen_model_name='YOLOv8n-Pose', mp_model_path=None,
+                           progress_callback=None, batch_size=16):
     """
-    Run chosen model on every frame, stabilise with StablePoseTracker,
-    draw skeleton, return per-frame kp17 list.
+    Fast extraction of keypoints from video.
+    If chosen_model_name == 'YOLOv8n-Pose', uses batched inference.
+    If output_video_path is provided, writes skeleton video; otherwise skips video writing.
 
     progress_callback: optional callable(percent: float) for progress updates.
     """
-    # Setup MediaPipe VIDEO-mode landmarker if needed
     mp_landmarker = None
     mp_ctx = None
     if chosen_model_name == 'MediaPipe BlazePose':
@@ -165,46 +165,70 @@ def extract_and_draw_video(input_video_path, output_video_path,
 
     cap = cv2.VideoCapture(input_video_path)
     orig_fps = int(cap.get(cv2.CAP_PROP_FPS)) or 30
-    target_fps = 30
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(output_video_path, fourcc, target_fps, (width, height))
+    out = None
+    if output_video_path:
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(output_video_path, fourcc, 30, (width, height))
 
     tracker = StablePoseTracker(ema_alpha=0.60, jump_threshold=0.25)
-
     all_kp17 = []
     frame_idx = 0
-    out_cnt = 0
 
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
+    if chosen_model_name == 'YOLOv8n-Pose':
+        from pose_models import _yolo_infer_batch
+        while cap.isOpened():
+            frames_batch = []
+            for _ in range(batch_size):
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                frames_batch.append(frame)
 
-        raw_kp17 = _raw_extract(frame, chosen_model_name,
-                                mp_landmarker, frame_idx, orig_fps, tracker)
-        stable_kp17 = tracker.update(raw_kp17)
+            if not frames_batch:
+                break
 
-        annotated = frame.copy()
-        if stable_kp17 is not None:
-            annotated = draw_kp17(annotated, stable_kp17, COCO17_CONNECTIONS)
-        all_kp17.append(stable_kp17)
+            raw_kps_batch = _yolo_infer_batch(frames_batch, tracker=tracker)
+            for frame, raw_kp in zip(frames_batch, raw_kps_batch):
+                stable_kp = tracker.update(raw_kp)
+                all_kp17.append(stable_kp)
 
-        while (out_cnt / target_fps) < ((frame_idx + 1) / orig_fps):
-            out.write(annotated)
-            out_cnt += 1
+                if out is not None:
+                    annotated = draw_kp17(frame.copy(), stable_kp, COCO17_CONNECTIONS)
+                    out.write(annotated)
 
-        if progress_callback and frame_idx % orig_fps == 0:
-            pct = frame_idx / max(total_frames, 1) * 100
-            progress_callback(pct)
+                frame_idx += 1
+                if progress_callback and frame_idx % max(1, orig_fps) == 0:
+                    pct = frame_idx / max(total_frames, 1) * 100
+                    progress_callback(pct)
 
-        frame_idx += 1
+    else:
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            raw_kp17 = _raw_extract(frame, chosen_model_name,
+                                    mp_landmarker, frame_idx, orig_fps, tracker)
+            stable_kp17 = tracker.update(raw_kp17)
+            all_kp17.append(stable_kp17)
+
+            if out is not None:
+                annotated = draw_kp17(frame.copy(), stable_kp17, COCO17_CONNECTIONS)
+                out.write(annotated)
+
+            if progress_callback and frame_idx % max(1, orig_fps) == 0:
+                pct = frame_idx / max(total_frames, 1) * 100
+                progress_callback(pct)
+
+            frame_idx += 1
 
     cap.release()
-    out.release()
+    if out is not None:
+        out.release()
     if mp_ctx is not None:
         mp_ctx.__exit__(None, None, None)
 
@@ -212,3 +236,8 @@ def extract_and_draw_video(input_video_path, output_video_path,
         progress_callback(100.0)
 
     return all_kp17
+
+
+# Alias for backward compatibility
+extract_and_draw_video = extract_keypoints_video
+
