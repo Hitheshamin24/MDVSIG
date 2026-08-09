@@ -5,7 +5,6 @@ import {
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from 'recharts';
 
-/* ── Build chart data from real backend output ──────────────────────────────── */
 
 /**
  * Returns bar chart data for part_scores.

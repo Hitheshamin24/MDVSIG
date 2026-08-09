@@ -6,6 +6,7 @@ import os
 import uuid
 import json
 import time
+import shutil
 import threading
 from flask import Flask, request, jsonify, Response, send_file
 from flask_cors import CORS
@@ -181,19 +182,82 @@ def stream_progress(job_id):
 
 @app.route('/api/results/<job_id>')
 def get_results(job_id):
-    """Get job results."""
+    """Get job results from memory or disk."""
+    safe_id = os.path.basename(job_id)
+
     with jobs_lock:
-        job = jobs.get(job_id)
-        if job is None:
-            return jsonify({'error': 'Job not found'}), 404
+        job = jobs.get(safe_id)
+        if job and job.get('status') == 'error':
+            return jsonify({'status': 'error', 'error': job.get('error')}), 500
+        if job and job.get('status') != 'complete':
+            return jsonify({'status': job.get('status')}), 202
+        if job and job.get('results'):
+            return jsonify(job['results'])
 
-        if job['status'] == 'error':
-            return jsonify({'status': 'error', 'error': job['error']}), 500
+    # Disk fallback for past jobs or server restarts
+    json_path = os.path.join(UPLOAD_DIR, safe_id, 'results.json')
+    if os.path.exists(json_path):
+        try:
+            with open(json_path, 'r') as f:
+                res = json.load(f)
+                return jsonify(res)
+        except Exception as e:
+            return jsonify({'error': f'Failed to read results: {str(e)}'}), 500
 
-        if job['status'] != 'complete':
-            return jsonify({'status': job['status']}), 202
+    return jsonify({'error': 'Job not found'}), 404
 
-        return jsonify(job['results'])
+
+@app.route('/api/history', methods=['GET'])
+def get_history():
+    """List all saved past video comparisons from disk."""
+    history = []
+    if not os.path.exists(UPLOAD_DIR):
+        return jsonify([])
+
+    for entry in os.listdir(UPLOAD_DIR):
+        job_dir = os.path.join(UPLOAD_DIR, entry)
+        if os.path.isdir(job_dir):
+            json_path = os.path.join(job_dir, 'results.json')
+            if os.path.exists(json_path):
+                try:
+                    with open(json_path, 'r') as f:
+                        data = json.load(f)
+                        mtime = os.path.getmtime(json_path)
+                        history.append({
+                            'job_id': entry,
+                            'mtime': mtime,
+                            'date_str': time.strftime('%b %d, %H:%M', time.localtime(mtime)),
+                            'overall_score': data.get('overall_score', 0),
+                            'best_model': data.get('best_model', 'YOLOv8n-Pose'),
+                            'output_video': data.get('output_video', 'merged_dance_with_feedback.mp4'),
+                            'part_scores': data.get('part_scores', {}),
+                        })
+                except Exception:
+                    pass
+
+    # Sort newest first
+    history.sort(key=lambda x: x['mtime'], reverse=True)
+    return jsonify(history)
+
+
+@app.route('/api/history/<job_id>', methods=['DELETE'])
+def delete_history_item(job_id):
+    """Delete a saved comparison from disk and in-memory jobs."""
+    safe_id = os.path.basename(job_id)
+    job_dir = os.path.join(UPLOAD_DIR, safe_id)
+
+    with jobs_lock:
+        if safe_id in jobs:
+            del jobs[safe_id]
+
+    if os.path.exists(job_dir) and os.path.isdir(job_dir):
+        try:
+            shutil.rmtree(job_dir)
+            return jsonify({'status': 'deleted', 'job_id': safe_id})
+        except Exception as e:
+            return jsonify({'error': f'Failed to delete job folder: {str(e)}'}), 500
+
+    return jsonify({'status': 'deleted', 'job_id': safe_id}), 200
 
 
 @app.route('/api/download/<job_id>/<filename>')
@@ -222,4 +286,4 @@ if __name__ == '__main__':
     print(f"  Upload dir: {UPLOAD_DIR}")
     print(f"  Server: http://localhost:5000")
     print("=" * 60)
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    app.run(host='0.0.0.0', port=5000, debug=True)

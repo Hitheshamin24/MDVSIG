@@ -1,10 +1,5 @@
 // FeedbackTab.jsx — Generates actionable feedback from real part_scores
-/**
- * Derives Strengths and Work-on-This from real backend part_scores.
- * part_scores keys: 'Left Arm', 'Right Arm', 'Left Leg', 'Right Leg', 'Torso'
- * overall_score: float
- * audio_offset: float
- */
+
 
 const PART_ADVICE = {
   'Left Arm': {

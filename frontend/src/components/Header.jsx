@@ -40,13 +40,7 @@ export default function Header() {
           className={`ss-nav-link ${path === '/compare' ? 'active' : ''}`}
           onClick={() => navigate('/compare')}
         >
-          Compare
-        </button>
-        <button
-          className={`ss-nav-link ${path === '/auth' ? 'active' : ''}`}
-          onClick={() => navigate('/auth')}
-        >
-          Sign in
+          Recent Outputs & Compare 🎬
         </button>
       </nav>
     </header>
