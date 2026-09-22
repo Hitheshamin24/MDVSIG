@@ -27,10 +27,11 @@ const DEMO_RESULTS = {
     'Torso': 77.9,
   },
   output_video: 'merged_dance_with_feedback.mp4',
-  chart_image: 'model_comparison_chart.png',
+  // Cloudinary-hosted URL — replaced with real URL after first real job
+  output_video_url: null,
+  chart_image: null,
   video1_frames: 1629,
   video2_frames: 1690,
-  demo_job_id: '03c9d085',
 };
 
 export default function ComparePage({ jobId, processing, onProcessComplete, onProcessError, onReset }) {

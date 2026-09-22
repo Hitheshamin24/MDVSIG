@@ -263,15 +263,13 @@ def run_pipeline(video1_path, video2_path, job_dir, progress_callback=None):
         'overall_score': round(avg_overall, 1),
         'part_scores': {k: round(v, 1) for k, v in part_averages.items()},
         'benchmark': {},
+        # Absolute local path — used by app.py to upload to Cloudinary, then deleted
+        'output_video_path': output_video,
+        # Friendly filename (kept for display purposes)
         'output_video': 'merged_dance_with_feedback.mp4',
         'chart_image': None,
         'video1_frames': len(kp17_v1),
         'video2_frames': len(kp17_v2),
     }
-
-    # Save results JSON
-    results_path = os.path.join(job_dir, 'results.json')
-    with open(results_path, 'w') as f:
-        json.dump(results, f, indent=2)
 
     return results

@@ -75,10 +75,8 @@ export default function PlaybackTab({ jobId, results }) {
   const [savedToast, setSavedToast] = useState(false);
   const mistakes = deriveMistakes(results, duration);
 
-  // The merged output video from the backend
-  const effectiveJobId = jobId || results?.demo_job_id || '03c9d085';
-  const videoFileName  = results?.output_video || 'merged_dance_with_feedback.mp4';
-  const outputVideoUrl = `/api/download/${effectiveJobId}/${videoFileName}`;
+  // Merged output video — served from Cloudinary (no local /api/download needed)
+  const outputVideoUrl = results?.output_video_url || null;
 
   function togglePlay() {
     const v = videoRef.current;
@@ -224,23 +222,26 @@ export default function PlaybackTab({ jobId, results }) {
               {savedToast ? '💾 Saved to LocalStorage ✓' : '💾 Save Output'}
             </button>
 
-            <a
-              href={outputVideoUrl}
-              download="comparison_video.mp4"
-              style={{
-                marginLeft: 10,
-                padding: '6px 14px',
-                borderRadius: 'var(--r-md)',
-                background: 'var(--green-dim)',
-                border: '1px solid rgba(163,230,53,0.25)',
-                color: 'var(--green)',
-                fontSize: '0.78rem',
-                fontWeight: 600,
-                whiteSpace: 'nowrap',
-              }}
-            >
-              ⬇ Download Video
-            </a>
+            {outputVideoUrl && (
+              <a
+                href={outputVideoUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{
+                  marginLeft: 10,
+                  padding: '6px 14px',
+                  borderRadius: 'var(--r-md)',
+                  background: 'var(--green-dim)',
+                  border: '1px solid rgba(163,230,53,0.25)',
+                  color: 'var(--green)',
+                  fontSize: '0.78rem',
+                  fontWeight: 600,
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                ⬇ Download Video
+              </a>
+            )}
           </div>
         )}
       </div>

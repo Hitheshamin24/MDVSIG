@@ -13,3 +13,5 @@ matplotlib
 seaborn
 soundfile
 pillow
+cloudinary
+python-dotenv
