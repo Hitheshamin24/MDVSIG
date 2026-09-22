@@ -1,0 +1,21 @@
+{
+  "status": "complete",
+  "best_model": "YOLOv8n-Pose",
+  "audio_offset": 2.8453514739229027,
+  "overall_score": 64.7,
+  "part_scores": {
+    "Left Arm": 57.1,
+    "Right Arm": 51.1,
+    "Left Leg": 66.7,
+    "Right Leg": 66.0,
+    "Torso": 82.5
+  },
+  "benchmark": {},
+  "output_video_path": "D:\\hithesh\\project\\MDVSIG\\backend\\uploads\\a636d2ea\\merged_dance_with_feedback.mp4",
+  "output_video": "merged_dance_with_feedback.mp4",
+  "chart_image": null,
+  "video1_frames": 1583,
+  "video2_frames": 1437,
+  "output_video_url": "https://res.cloudinary.com/p4bbtf3f/video/upload/v1790064179/mdvsig/outputs/a636d2ea/merged_output.mp4",
+  "cloudinary_output_public_id": "mdvsig/outputs/a636d2ea/merged_output"
+}
